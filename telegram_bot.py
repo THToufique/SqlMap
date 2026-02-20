@@ -11,7 +11,7 @@ try:
 except ImportError:
     pass
 
-user_sessions = defaultdict(lambda: {'url': None, 'options': set(), 'page': 0, 'session_id': None})
+user_sessions = defaultdict(lambda: {'url': None, 'options': set(), 'page': 0, 'session_id': None, 'custom_args': '', 'dump_state': None, 'databases': []})
 
 ALL_OPTIONS = [
     {'Databases': '--dbs', 'Tables': '--tables', 'Columns': '--columns', 'Dump All': '--dump-all'},
@@ -61,8 +61,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔰 SQLMap Bot\n\n"
         "Commands:\n"
         "• /sqlmap <URL> - Start scan with options\n"
+        "• /dump - Interactive dump (DB → Table → Columns)\n"
         "• /continue - Add more options to scan"
     )
+
+async def dump_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session or not session['url']:
+        await update.message.reply_text("❌ No active session. Start with /sqlmap <URL>")
+        return
+    
+    await update.message.reply_text("🔍 Fetching databases...")
+    
+    # Get databases
+    cmd = f"python sqlmap.py -u {session['url']} --dbs --batch"
+    proc = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, cwd=os.path.dirname(__file__))
+    output, _ = await proc.communicate()
+    
+    # Parse databases
+    dbs = []
+    for line in output.decode().split('\n'):
+        if line.strip().startswith('[*]'):
+            db = line.strip()[4:].strip()
+            if db and db not in ['information_schema', 'performance_schema', 'mysql', 'sys']:
+                dbs.append(db)
+    
+    if not dbs:
+        await update.message.reply_text("❌ No databases found")
+        return
+    
+    session['databases'] = dbs
+    session['dump_state'] = 'select_db'
+    
+    keyboard = [[InlineKeyboardButton(db, callback_data=f"db_{db}")] for db in dbs]
+    await update.message.reply_text("📊 Select database:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def continue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -198,6 +232,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("sqlmap", sqlmap_cmd))
     app.add_handler(CommandHandler("continue", continue_cmd))
+    app.add_handler(CommandHandler("dump", dump_cmd))
     app.add_handler(CallbackQueryHandler(button_callback))
     
     print("Bot started")
