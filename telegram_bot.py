@@ -51,6 +51,49 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /sqlmap <URL> - Start scan\n"
     )
 
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = update.effective_user.id
+    session = user_sessions[user_id]
+    
+    await query.answer()
+    
+    data = query.data
+    
+    if data.startswith("opt_"):
+        _, page, label = data.split("_", 2)
+        page = int(page)
+        value = ALL_OPTIONS[page][label]
+        
+        if value in session['options']:
+            session['options'].remove(value)
+            await query.answer(f"➖ {label}")
+        else:
+            session['options'].add(value)
+            await query.answer(f"➕ {label}")
+        
+        try:
+            await query.edit_message_reply_markup(reply_markup=create_keyboard(user_id, page))
+        except Exception:
+            pass
+    
+    elif data.startswith("page_"):
+        page = int(data.split("_")[1])
+        session['page'] = page
+        await query.edit_message_text(
+            f"🌐 Target: `{session['url']}`\n\n**Page {page+1}/{len(ALL_OPTIONS)}**",
+            reply_markup=create_keyboard(user_id, page),
+            parse_mode='Markdown'
+        )
+    
+    elif data == "done":
+        if not session['options']:
+            await query.answer("❌ Select at least one option", show_alert=True)
+            return
+        
+        await query.answer("🔰 Starting... 🔰")
+        await query.edit_message_text("✅ Scan queued!")
+
 async def sqlmap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -81,6 +124,7 @@ def main():
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("sqlmap", sqlmap_cmd))
+    app.add_handler(CallbackQueryHandler(button_callback))
     
     print("Bot started")
     app.run_polling()
