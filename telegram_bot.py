@@ -309,15 +309,25 @@ async def run_scan(chat_id, user_id, context):
             await context.bot.send_message(chat_id, f"```\n{chunk}\n```", parse_mode='Markdown')
         
         # Send CSV results file
-        log_dir = os.path.join(os.path.dirname(__file__), '.sqlmap', 'output')
-        if os.path.exists(log_dir):
-            for root, dirs, files in os.walk(log_dir):
-                for file in files:
-                    if file.endswith('.csv') or file.endswith('.txt'):
-                        path = os.path.join(root, file)
-                        if os.path.getsize(path) < 50000000:
-                            with open(path, 'rb') as f:
-                                await context.bot.send_document(chat_id, document=f, filename=file, caption=f"📄 Results")
+        # Check multiple possible locations
+        possible_dirs = [
+            os.path.join(os.path.dirname(__file__), '.sqlmap', 'output'),
+            os.path.expanduser('~/.local/share/sqlmap/output'),
+            '/opt/render/.local/share/sqlmap/output'
+        ]
+        
+        for log_dir in possible_dirs:
+            if os.path.exists(log_dir):
+                for root, dirs, files in os.walk(log_dir):
+                    for file in files:
+                        if file.endswith('.csv') or file.endswith('.txt'):
+                            path = os.path.join(root, file)
+                            try:
+                                if os.path.getsize(path) < 50000000:
+                                    with open(path, 'rb') as f:
+                                        await context.bot.send_document(chat_id, document=f, filename=file, caption=f"📄 Results")
+                            except Exception:
+                                pass
     except Exception as e:
         await status_msg.edit_text(f"❌ {str(e)}")
     finally:
