@@ -78,7 +78,14 @@ async def sqlmap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     session_id = re.sub(r'[^a-zA-Z0-9]', '_', url)[:50]
-    user_sessions[user_id] = {'url': url, 'options': set(), 'page': 0, 'session_id': session_id, 'custom_args': ''}
+    
+    # Update session instead of replacing it
+    session = user_sessions[user_id]
+    session['url'] = url
+    session['session_id'] = session_id
+    session['options'] = set()
+    session['page'] = 0
+    session['custom_args'] = ''
     
     await update.message.reply_text(
         f"🌐 Target: `{url}`\n\n**Page 1/{len(ALL_OPTIONS)}**\n\n"
@@ -349,8 +356,10 @@ async def run_scan(chat_id, user_id, context):
     except Exception as e:
         await status_msg.edit_text(f"❌ {str(e)}")
     finally:
+        # Clear only options, keep URL and session for /continue and /dump
         session['options'].clear()
         session['custom_args'] = ''
+        # Don't clear url, session_id, or dump-related fields
 
 def main():
     token = os.getenv('TELEGRAM_TOKEN')
